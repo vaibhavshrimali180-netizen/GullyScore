@@ -1,0 +1,2011 @@
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import {
+  Plus, Users, ChevronRight, ChevronLeft, X, Trophy, Clock, TrendingUp,
+  Search, Sun, Moon, Undo2, Edit3, Share2, Download, Check, Trash2,
+  ChevronDown, Play, BarChart3, Calendar, Target, Zap, Award, Home,
+  History as HistoryIcon, Settings, ArrowRight, RotateCcw
+} from "lucide-react";
+
+/* ============================================================
+   GULLYSCORE — gully cricket scoring app
+   Design system:
+   - Pitch green base, chalk white surfaces, leather-red wickets,
+     bail-amber boundaries, turf-green primary actions
+   - Display: Teko (scoreboard numerals) / Body: Inter / Data: JetBrains Mono
+   - Signature: tally-mark over tracker, flip-digit score updates
+   ============================================================ */
+
+// ---------- Storage helpers (mock backend via localStorage) ----------
+const STORE_KEY = "gullyscore_v1";
+
+function loadStore() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return null;
+}
+
+function saveStore(data) {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(data));
+  } catch (e) {}
+}
+
+// ---------- ID generator ----------
+let idCounter = 1000;
+const genId = (prefix) => `${prefix}_${Date.now()}_${idCounter++}`;
+
+// ---------- Sample data generator ----------
+function generateSampleData() {
+  const teamNames = [
+    { name: "Shastri Nagar Strikers", short: "SNS", color: "#5B8C3E" },
+    { name: "Lane 7 Lions", short: "L7L", color: "#C1432E" },
+    { name: "Galli Gladiators", short: "GLD", color: "#D4A24C" },
+    { name: "Tiffin Box Tigers", short: "TBT", color: "#3E7C8C" },
+  ];
+  const firstNames = ["Rohan", "Aarav", "Vikram", "Suresh", "Imran", "Karan", "Dev", "Sahil",
+    "Rajesh", "Amit", "Vivek", "Nikhil", "Ankit", "Manoj", "Tarun", "Yusuf",
+    "Pradeep", "Sanjay", "Gaurav", "Rahul", "Kabir", "Arjun"];
+
+  const teams = teamNames.map((t, i) => {
+    const players = [];
+    const usedNames = new Set();
+    for (let p = 0; p < 8; p++) {
+      let nm;
+      do { nm = firstNames[Math.floor(Math.random() * firstNames.length)]; }
+      while (usedNames.has(nm));
+      usedNames.add(nm);
+      players.push({
+        id: genId("player"),
+        name: nm,
+        role: p === 0 ? "Captain" : (p < 4 ? "Batsman" : p < 7 ? "Bowler" : "All-rounder"),
+        stats: { matches: 0, runs: 0, balls: 0, wickets: 0, fours: 0, sixes: 0, highScore: 0 }
+      });
+    }
+    return {
+      id: genId("team"),
+      name: t.name,
+      shortName: t.short,
+      color: t.color,
+      players,
+      createdAt: Date.now() - (4 - i) * 86400000 * 6,
+    };
+  });
+
+  // One completed match for history
+  const teamA = teams[0], teamB = teams[1];
+  const completedMatch = {
+    id: genId("match"),
+    teamAId: teamA.id,
+    teamBId: teamB.id,
+    overs: 5,
+    status: "completed",
+    tossWinner: teamA.id,
+    tossDecision: "bat",
+    date: Date.now() - 86400000 * 2,
+    innings: [
+      {
+        battingTeamId: teamA.id,
+        bowlingTeamId: teamB.id,
+        runs: 52, wickets: 4, oversBowled: 5.0,
+        balls: [],
+        batsmen: {
+          [teamA.players[0].id]: { runs: 23, balls: 14, fours: 3, sixes: 1, out: true },
+          [teamA.players[1].id]: { runs: 18, balls: 12, fours: 2, sixes: 0, out: true },
+          [teamA.players[2].id]: { runs: 8, balls: 6, fours: 1, sixes: 0, out: false },
+        },
+        bowlers: {
+          [teamB.players[4].id]: { overs: 2, runs: 21, wickets: 2 },
+          [teamB.players[5].id]: { overs: 2, runs: 19, wickets: 1 },
+        }
+      },
+      {
+        battingTeamId: teamB.id,
+        bowlingTeamId: teamA.id,
+        runs: 41, wickets: 6, oversBowled: 5.0,
+        balls: [],
+        batsmen: {
+          [teamB.players[0].id]: { runs: 15, balls: 11, fours: 2, sixes: 0, out: true },
+          [teamB.players[1].id]: { runs: 12, balls: 9, fours: 1, sixes: 0, out: true },
+        },
+        bowlers: {
+          [teamA.players[4].id]: { overs: 2, runs: 14, wickets: 3 },
+          [teamA.players[5].id]: { overs: 2, runs: 16, wickets: 2 },
+        }
+      }
+    ],
+    result: `${teamA.name} won by 11 runs`,
+    topPerformer: { playerName: teamA.players[0].name, teamShort: teamA.shortName, summary: "23 (14)" },
+  };
+
+  return { teams, matches: [completedMatch], tournaments: [] };
+}
+
+// ---------- Theme ----------
+function useTheme() {
+  const [dark, setDark] = useState(true);
+  useEffect(() => {
+    const stored = localStorage.getItem("gullyscore_theme");
+    if (stored) setDark(stored === "dark");
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("gullyscore_theme", dark ? "dark" : "light");
+  }, [dark]);
+  return [dark, setDark];
+}
+
+// ---------- Cricket scoring engine helpers ----------
+function ballsToOvers(balls) {
+  const o = Math.floor(balls / 6);
+  const b = balls % 6;
+  return `${o}.${b}`;
+}
+function oversToBalls(oversStr) {
+  const [o, b] = String(oversStr).split(".").map(Number);
+  return o * 6 + (b || 0);
+}
+function runRate(runs, balls) {
+  if (balls === 0) return "0.00";
+  return ((runs / balls) * 6).toFixed(2);
+}
+function requiredRunRate(runsNeeded, ballsLeft) {
+  if (ballsLeft <= 0) return "—";
+  return ((runsNeeded / ballsLeft) * 6).toFixed(2);
+}
+
+// ============================================================
+// MAIN APP
+// ============================================================
+export default function App() {
+  const [dark, setDark] = useTheme();
+  const [data, setData] = useState(null);
+  const [route, setRoute] = useState({ page: "dashboard" });
+  const [toast, setToast] = useState(null);
+
+  // Load / init data
+  useEffect(() => {
+    let stored = loadStore();
+    if (!stored) {
+      stored = generateSampleData();
+      saveStore(stored);
+    }
+    setData(stored);
+  }, []);
+
+  // Persist on change
+  useEffect(() => {
+    if (data) saveStore(data);
+  }, [data]);
+
+  const showToast = useCallback((msg, type = "info") => {
+    setToast({ msg, type, id: Date.now() });
+  }, []);
+
+  useEffect(() => {
+    if (toast) {
+      const t = setTimeout(() => setToast(null), 2600);
+      return () => clearTimeout(t);
+    }
+  }, [toast]);
+
+  if (!data) return <SplashLoader dark={dark} />;
+
+  const updateData = (fn) => setData((prev) => fn({ ...prev }));
+
+  return (
+    <div className={dark ? "dark" : ""}>
+      <style>{GLOBAL_CSS}</style>
+      <div className="app-shell">
+        {route.page === "dashboard" && (
+          <Dashboard data={data} setRoute={setRoute} dark={dark} setDark={setDark} />
+        )}
+        {route.page === "teams" && (
+          <TeamsPage data={data} updateData={updateData} setRoute={setRoute} showToast={showToast} />
+        )}
+        {route.page === "team-detail" && (
+          <TeamDetailPage data={data} updateData={updateData} setRoute={setRoute} teamId={route.teamId} showToast={showToast} />
+        )}
+        {route.page === "new-match" && (
+          <NewMatchPage data={data} updateData={updateData} setRoute={setRoute} showToast={showToast} />
+        )}
+        {route.page === "live-match" && (
+          <LiveMatchPage data={data} updateData={updateData} setRoute={setRoute} matchId={route.matchId} showToast={showToast} />
+        )}
+        {route.page === "scorecard" && (
+          <ScorecardPage data={data} setRoute={setRoute} matchId={route.matchId} updateData={updateData} showToast={showToast} />
+        )}
+        {route.page === "history" && (
+          <HistoryPage data={data} setRoute={setRoute} />
+        )}
+        {route.page === "tournaments" && (
+          <TournamentsPage data={data} updateData={updateData} setRoute={setRoute} showToast={showToast} />
+        )}
+        {route.page === "tournament-detail" && (
+          <TournamentDetailPage data={data} updateData={updateData} setRoute={setRoute} tournamentId={route.tournamentId} showToast={showToast} />
+        )}
+
+        {toast && <Toast toast={toast} />}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SPLASH / LOADER
+// ============================================================
+function SplashLoader({ dark }) {
+  return (
+    <div className={dark ? "dark" : ""}>
+      <style>{GLOBAL_CSS}</style>
+      <div className="app-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>
+        <div className="splash-mark">
+          <span className="splash-ball" />
+          <span className="splash-text">GullyScore</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// TOAST
+// ============================================================
+function Toast({ toast }) {
+  return (
+    <div className="toast" key={toast.id}>
+      <Check size={16} strokeWidth={3} />
+      <span>{toast.msg}</span>
+    </div>
+  );
+}
+
+// ============================================================
+// BOTTOM NAV
+// ============================================================
+function BottomNav({ active, setRoute }) {
+  const items = [
+    { key: "dashboard", icon: Home, label: "Home" },
+    { key: "teams", icon: Users, label: "Teams" },
+    { key: "tournaments", icon: Trophy, label: "Cups" },
+    { key: "history", icon: HistoryIcon, label: "History" },
+  ];
+  return (
+    <nav className="bottom-nav">
+      {items.map((it) => (
+        <button
+          key={it.key}
+          className={`nav-item ${active === it.key ? "active" : ""}`}
+          onClick={() => setRoute({ page: it.key })}
+        >
+          <it.icon size={20} strokeWidth={active === it.key ? 2.5 : 2} />
+          <span>{it.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+function Dashboard({ data, setRoute, dark, setDark }) {
+  const ongoing = data.matches.filter((m) => m.status === "live");
+  const recent = data.matches.filter((m) => m.status === "completed").slice(-3).reverse();
+  const activeTournaments = data.tournaments.filter((t) => t.status !== "completed");
+
+  return (
+    <div className="page">
+      <header className="topbar">
+        <div>
+          <div className="eyebrow">Colony Cricket</div>
+          <h1 className="brand-title">GullyScore</h1>
+        </div>
+        <button className="icon-btn" onClick={() => setDark(!dark)} aria-label="Toggle theme">
+          {dark ? <Sun size={19} /> : <Moon size={19} />}
+        </button>
+      </header>
+
+      <div className="content-scroll">
+        {/* Primary CTA */}
+        <button className="cta-primary" onClick={() => setRoute({ page: "new-match" })}>
+          <div className="cta-primary-icon"><Play size={20} fill="currentColor" /></div>
+          <div className="cta-primary-text">
+            <strong>Start New Match</strong>
+            <span>Pick two teams &amp; start scoring</span>
+          </div>
+          <ArrowRight size={18} />
+        </button>
+
+        {/* Ongoing matches */}
+        {ongoing.length > 0 && (
+          <Section title="Ongoing" badge={ongoing.length}>
+            {ongoing.map((m) => (
+              <LiveMatchCard key={m.id} match={m} data={data} setRoute={setRoute} />
+            ))}
+          </Section>
+        )}
+
+        {/* Quick stats row */}
+        <div className="stat-row">
+          <div className="stat-pill">
+            <Users size={16} />
+            <div><strong>{data.teams.length}</strong><span>Teams</span></div>
+          </div>
+          <div className="stat-pill">
+            <Target size={16} />
+            <div><strong>{data.matches.filter(m=>m.status==='completed').length}</strong><span>Matches</span></div>
+          </div>
+          <div className="stat-pill">
+            <Trophy size={16} />
+            <div><strong>{data.tournaments.length}</strong><span>Tournaments</span></div>
+          </div>
+        </div>
+
+        {/* Active tournaments */}
+        {activeTournaments.length > 0 && (
+          <Section title="Tournaments" onMore={() => setRoute({ page: "tournaments" })}>
+            {activeTournaments.slice(0, 2).map((t) => (
+              <button key={t.id} className="tourney-card" onClick={() => setRoute({ page: "tournament-detail", tournamentId: t.id })}>
+                <Trophy size={18} color="var(--amber)" />
+                <div className="tourney-card-text">
+                  <strong>{t.name}</strong>
+                  <span>{t.teamIds.length} teams · {t.matches?.filter(m=>m.status==='completed').length || 0}/{t.matches?.length || 0} played</span>
+                </div>
+                <ChevronRight size={16} />
+              </button>
+            ))}
+          </Section>
+        )}
+
+        {/* Recent matches */}
+        <Section title="Recent Matches" onMore={recent.length ? () => setRoute({ page: "history" }) : null}>
+          {recent.length === 0 && <EmptyHint text="No matches played yet. Start one above!" />}
+          {recent.map((m) => (
+            <RecentMatchCard key={m.id} match={m} data={data} setRoute={setRoute} />
+          ))}
+        </Section>
+
+        <div style={{ height: 90 }} />
+      </div>
+
+      <BottomNav active="dashboard" setRoute={setRoute} />
+    </div>
+  );
+}
+
+function Section({ title, badge, onMore, children }) {
+  return (
+    <div className="section">
+      <div className="section-head">
+        <h2>{title}{badge ? <span className="badge-count">{badge}</span> : null}</h2>
+        {onMore && <button className="link-btn" onClick={onMore}>See all</button>}
+      </div>
+      <div className="section-body">{children}</div>
+    </div>
+  );
+}
+
+function EmptyHint({ text }) {
+  return <div className="empty-hint">{text}</div>;
+}
+
+function teamById(data, id) { return data.teams.find((t) => t.id === id); }
+
+function LiveMatchCard({ match, data, setRoute }) {
+  const teamA = teamById(data, match.teamAId);
+  const teamB = teamById(data, match.teamBId);
+  const inn = match.innings[match.currentInnings || 0];
+  const battingTeam = teamById(data, inn.battingTeamId);
+  return (
+    <button className="live-card" onClick={() => setRoute({ page: "live-match", matchId: match.id })}>
+      <div className="live-pulse-row">
+        <span className="live-dot" /> LIVE · {battingTeam.shortName} batting
+      </div>
+      <div className="live-score-row">
+        <span className="live-score-num">{inn.runs}/{inn.wickets}</span>
+        <span className="live-score-overs">({ballsToOvers(inn.balls.length)} ov)</span>
+      </div>
+      <div className="live-teams-row">{teamA.shortName} vs {teamB.shortName} · {match.overs} overs</div>
+    </button>
+  );
+}
+
+function RecentMatchCard({ match, data, setRoute }) {
+  const teamA = teamById(data, match.teamAId);
+  const teamB = teamById(data, match.teamBId);
+  return (
+    <button className="recent-card" onClick={() => setRoute({ page: "scorecard", matchId: match.id })}>
+      <div className="recent-teams">
+        <TeamChip team={teamA} /> <span className="vs-text">vs</span> <TeamChip team={teamB} />
+      </div>
+      <div className="recent-result">{match.result}</div>
+      <div className="recent-meta">
+        <span><Calendar size={12} /> {new Date(match.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</span>
+        {match.topPerformer && <span className="recent-mvp"><Zap size={12} /> {match.topPerformer.playerName} · {match.topPerformer.summary}</span>}
+      </div>
+    </button>
+  );
+}
+
+function TeamChip({ team }) {
+  return (
+    <span className="team-chip" style={{ "--chip-color": team.color }}>
+      <span className="team-chip-dot" />{team.shortName}
+    </span>
+  );
+}
+
+// ============================================================
+// TEAMS PAGE
+// ============================================================
+function TeamsPage({ data, updateData, setRoute, showToast }) {
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState("");
+  const [shortName, setShortName] = useState("");
+  const palette = ["#5B8C3E", "#C1432E", "#D4A24C", "#3E7C8C", "#8E5BA8", "#B8742E"];
+
+  const createTeam = () => {
+    if (!name.trim()) return;
+    const color = palette[data.teams.length % palette.length];
+    const newTeam = {
+      id: genId("team"),
+      name: name.trim(),
+      shortName: (shortName.trim() || name.trim().slice(0, 3)).toUpperCase(),
+      color,
+      players: [],
+      createdAt: Date.now(),
+    };
+    updateData((d) => ({ ...d, teams: [...d.teams, newTeam] }));
+    setName(""); setShortName(""); setShowCreate(false);
+    showToast("Team created");
+  };
+
+  return (
+    <div className="page">
+      <SubHeader title="Teams" onBack={() => setRoute({ page: "dashboard" })} action={
+        <button className="icon-btn-fill" onClick={() => setShowCreate(true)}><Plus size={18} /></button>
+      } />
+      <div className="content-scroll">
+        {data.teams.length === 0 && <EmptyHint text="No teams yet. Tap + to create your first team." />}
+        <div className="team-grid">
+          {data.teams.map((t) => (
+            <button key={t.id} className="team-card" style={{ "--team-color": t.color }} onClick={() => setRoute({ page: "team-detail", teamId: t.id })}>
+              <div className="team-card-top">
+                <div className="team-card-avatar">{t.shortName.slice(0, 2)}</div>
+                <ChevronRight size={16} />
+              </div>
+              <strong className="team-card-name">{t.name}</strong>
+              <span className="team-card-meta">{t.players.length} players</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ height: 30 }} />
+      </div>
+      <BottomNav active="teams" setRoute={setRoute} />
+
+      {showCreate && (
+        <Sheet onClose={() => setShowCreate(false)} title="New Team">
+          <label className="field-label">Team name</label>
+          <input className="text-input" placeholder="e.g. Shastri Nagar Strikers" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          <label className="field-label">Short name (3-4 letters)</label>
+          <input className="text-input" placeholder="e.g. SNS" maxLength={4} value={shortName} onChange={(e) => setShortName(e.target.value.toUpperCase())} />
+          <button className="cta-full" onClick={createTeam}><Plus size={16} /> Create Team</button>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+function SubHeader({ title, onBack, action, subtitle }) {
+  return (
+    <header className="subheader">
+      <button className="icon-btn" onClick={onBack}><ChevronLeft size={20} /></button>
+      <div className="subheader-title">
+        <h1>{title}</h1>
+        {subtitle && <span>{subtitle}</span>}
+      </div>
+      {action}
+    </header>
+  );
+}
+
+function Sheet({ onClose, title, children }) {
+  return (
+    <div className="sheet-overlay" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-handle" />
+        <div className="sheet-head">
+          <h3>{title}</h3>
+          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="sheet-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// TEAM DETAIL PAGE
+// ============================================================
+function TeamDetailPage({ data, updateData, setRoute, teamId, showToast }) {
+  const team = teamById(data, teamId);
+  const [showAdd, setShowAdd] = useState(false);
+  const [playerName, setPlayerName] = useState("");
+  const [role, setRole] = useState("Batsman");
+
+  if (!team) return null;
+
+  const addPlayer = () => {
+    if (!playerName.trim()) return;
+    const newPlayer = {
+      id: genId("player"), name: playerName.trim(), role,
+      stats: { matches: 0, runs: 0, balls: 0, wickets: 0, fours: 0, sixes: 0, highScore: 0 }
+    };
+    updateData((d) => ({
+      ...d,
+      teams: d.teams.map((t) => t.id === teamId ? { ...t, players: [...t.players, newPlayer] } : t)
+    }));
+    setPlayerName(""); setShowAdd(false);
+    showToast("Player added");
+  };
+
+  const removePlayer = (pid) => {
+    updateData((d) => ({
+      ...d,
+      teams: d.teams.map((t) => t.id === teamId ? { ...t, players: t.players.filter(p => p.id !== pid) } : t)
+    }));
+  };
+
+  return (
+    <div className="page">
+      <SubHeader title={team.name} subtitle={`${team.players.length} players`} onBack={() => setRoute({ page: "teams" })}
+        action={<button className="icon-btn-fill" onClick={() => setShowAdd(true)}><Plus size={18} /></button>} />
+      <div className="content-scroll">
+        <div className="player-list">
+          {team.players.length === 0 && <EmptyHint text="No players yet. Add your squad." />}
+          {team.players.map((p) => (
+            <div key={p.id} className="player-row">
+              <div className="player-avatar" style={{ "--team-color": team.color }}>{p.name.slice(0, 2).toUpperCase()}</div>
+              <div className="player-info">
+                <strong>{p.name}</strong>
+                <span>{p.role}{p.stats.matches > 0 ? ` · ${p.stats.runs} runs, ${p.stats.wickets} wkts` : ""}</span>
+              </div>
+              <button className="icon-btn-ghost" onClick={() => removePlayer(p.id)}><Trash2 size={15} /></button>
+            </div>
+          ))}
+        </div>
+        <div style={{ height: 30 }} />
+      </div>
+
+      {showAdd && (
+        <Sheet onClose={() => setShowAdd(false)} title="Add Player">
+          <label className="field-label">Player name</label>
+          <input className="text-input" placeholder="e.g. Rohan" value={playerName} onChange={(e) => setPlayerName(e.target.value)} autoFocus />
+          <label className="field-label">Role</label>
+          <div className="chip-select">
+            {["Batsman", "Bowler", "All-rounder", "Captain"].map((r) => (
+              <button key={r} className={`chip-opt ${role === r ? "active" : ""}`} onClick={() => setRole(r)}>{r}</button>
+            ))}
+          </div>
+          <button className="cta-full" onClick={addPlayer}><Plus size={16} /> Add Player</button>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// NEW MATCH SETUP PAGE
+// ============================================================
+function NewMatchPage({ data, updateData, setRoute, showToast }) {
+  const [step, setStep] = useState(1);
+  const [teamAId, setTeamAId] = useState(null);
+  const [teamBId, setTeamBId] = useState(null);
+  const [overs, setOvers] = useState(5);
+  const [customOvers, setCustomOvers] = useState("");
+  const [tossWinner, setTossWinner] = useState(null);
+  const [tossDecision, setTossDecision] = useState("bat");
+
+  const eligibleTeams = data.teams.filter((t) => t.players.length >= 2);
+  const teamA = teamById(data, teamAId);
+  const teamB = teamById(data, teamBId);
+
+  const finalOvers = customOvers ? parseInt(customOvers) || 0 : overs;
+
+  const startMatch = () => {
+    if (!teamAId || !teamBId || !tossWinner || !finalOvers) return;
+    const battingFirstId = tossDecision === "bat" ? tossWinner : (tossWinner === teamAId ? teamBId : teamAId);
+    const bowlingFirstId = battingFirstId === teamAId ? teamBId : teamAId;
+
+    const newMatch = {
+      id: genId("match"),
+      teamAId, teamBId, overs: finalOvers,
+      status: "live",
+      tossWinner, tossDecision,
+      date: Date.now(),
+      currentInnings: 0,
+      innings: [
+        {
+          battingTeamId: battingFirstId,
+          bowlingTeamId: bowlingFirstId,
+          runs: 0, wickets: 0,
+          balls: [], // {runs, extra: null|'wd'|'nb'|'b'|'lb', wicket: bool, batsmanId, bowlerId}
+          batsmen: {},
+          bowlers: {},
+          strikerId: null,
+          nonStrikerId: null,
+          bowlerId: null,
+          batOrder: [],
+        }
+      ],
+    };
+    updateData((d) => ({ ...d, matches: [...d.matches, newMatch] }));
+    showToast("Match started!");
+    setRoute({ page: "live-match", matchId: newMatch.id, needsSetup: true });
+  };
+
+  return (
+    <div className="page">
+      <SubHeader title="New Match" subtitle={`Step ${step} of 3`} onBack={() => step === 1 ? setRoute({ page: "dashboard" }) : setStep(step - 1)} />
+      <div className="content-scroll">
+        {step === 1 && (
+          <>
+            <h3 className="form-section-title">Select Teams</h3>
+            {eligibleTeams.length < 2 && (
+              <div className="warn-banner">Need at least 2 teams with 2+ players each. <button className="link-btn" onClick={() => setRoute({ page: "teams" })}>Manage teams →</button></div>
+            )}
+            <label className="field-label">Team A</label>
+            <TeamPicker teams={eligibleTeams} selected={teamAId} exclude={teamBId} onSelect={setTeamAId} />
+            <label className="field-label" style={{ marginTop: 18 }}>Team B</label>
+            <TeamPicker teams={eligibleTeams} selected={teamBId} exclude={teamAId} onSelect={setTeamBId} />
+
+            <button className="cta-full" disabled={!teamAId || !teamBId} onClick={() => setStep(2)} style={{ marginTop: 24 }}>
+              Continue <ArrowRight size={16} />
+            </button>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <h3 className="form-section-title">Match Overs</h3>
+            <div className="overs-grid">
+              {[2, 5, 10, 20].map((n) => (
+                <button key={n} className={`overs-opt ${overs === n && !customOvers ? "active" : ""}`} onClick={() => { setOvers(n); setCustomOvers(""); }}>
+                  {n}<span>overs</span>
+                </button>
+              ))}
+            </div>
+            <label className="field-label" style={{ marginTop: 16 }}>Custom overs</label>
+            <input className="text-input" type="number" placeholder="e.g. 8" value={customOvers} onChange={(e) => setCustomOvers(e.target.value)} />
+
+            <button className="cta-full" disabled={!finalOvers} onClick={() => setStep(3)} style={{ marginTop: 24 }}>
+              Continue <ArrowRight size={16} />
+            </button>
+          </>
+        )}
+
+        {step === 3 && (
+          <>
+            <h3 className="form-section-title">Toss</h3>
+            <p className="form-hint">Who won the toss?</p>
+            <div className="toss-grid">
+              <button className={`toss-opt ${tossWinner === teamAId ? "active" : ""}`} style={{ "--team-color": teamA.color }} onClick={() => setTossWinner(teamAId)}>
+                <div className="team-card-avatar">{teamA.shortName.slice(0, 2)}</div>{teamA.name}
+              </button>
+              <button className={`toss-opt ${tossWinner === teamBId ? "active" : ""}`} style={{ "--team-color": teamB.color }} onClick={() => setTossWinner(teamBId)}>
+                <div className="team-card-avatar">{teamB.shortName.slice(0, 2)}</div>{teamB.name}
+              </button>
+            </div>
+
+            <p className="form-hint" style={{ marginTop: 18 }}>Elected to</p>
+            <div className="chip-select">
+              <button className={`chip-opt ${tossDecision === "bat" ? "active" : ""}`} onClick={() => setTossDecision("bat")}>Bat First</button>
+              <button className={`chip-opt ${tossDecision === "bowl" ? "active" : ""}`} onClick={() => setTossDecision("bowl")}>Bowl First</button>
+            </div>
+
+            <button className="cta-full" disabled={!tossWinner} onClick={startMatch} style={{ marginTop: 24 }}>
+              <Play size={16} fill="currentColor" /> Start Match
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TeamPicker({ teams, selected, exclude, onSelect }) {
+  return (
+    <div className="team-picker-grid">
+      {teams.map((t) => (
+        <button key={t.id} disabled={t.id === exclude} className={`team-pick-opt ${selected === t.id ? "active" : ""}`} style={{ "--team-color": t.color }} onClick={() => onSelect(t.id)}>
+          <div className="team-card-avatar">{t.shortName.slice(0, 2)}</div>
+          <span>{t.name}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================
+// LIVE MATCH — SETUP (openers/bowler) + SCORING
+// ============================================================
+function LiveMatchPage({ data, updateData, setRoute, matchId, showToast }) {
+  const match = data.matches.find((m) => m.id === matchId);
+  if (!match) return null;
+  const inn = match.innings[match.currentInnings];
+  const needsBatsmen = !inn.strikerId || !inn.nonStrikerId;
+  const needsBowler = !inn.bowlerId;
+
+  if (needsBatsmen || needsBowler) {
+    return <InningsSetup data={data} updateData={updateData} match={match} setRoute={setRoute} />;
+  }
+  return <ScoringScreen data={data} updateData={updateData} match={match} setRoute={setRoute} showToast={showToast} />;
+}
+
+function InningsSetup({ data, updateData, match, setRoute }) {
+  const inn = match.innings[match.currentInnings];
+  const battingTeam = teamById(data, inn.battingTeamId);
+  const bowlingTeam = teamById(data, inn.bowlingTeamId);
+  const [striker, setStriker] = useState(inn.strikerId || null);
+  const [nonStriker, setNonStriker] = useState(inn.nonStrikerId || null);
+  const [bowler, setBowler] = useState(inn.bowlerId || null);
+  const isSecondInnings = match.currentInnings === 1;
+
+  const confirm = () => {
+    if (!striker || !nonStriker || !bowler || striker === nonStriker) return;
+    updateData((d) => ({
+      ...d,
+      matches: d.matches.map((m) => {
+        if (m.id !== match.id) return m;
+        const newInnings = [...m.innings];
+        newInnings[m.currentInnings] = {
+          ...newInnings[m.currentInnings],
+          strikerId: striker, nonStrikerId: nonStriker, bowlerId: bowler,
+          batOrder: [striker, nonStriker],
+          batsmen: {
+            ...newInnings[m.currentInnings].batsmen,
+            [striker]: { runs: 0, balls: 0, fours: 0, sixes: 0, out: false },
+            [nonStriker]: { runs: 0, balls: 0, fours: 0, sixes: 0, out: false },
+          },
+          bowlers: {
+            ...newInnings[m.currentInnings].bowlers,
+            [bowler]: { overs: 0, ballsInOver: 0, runs: 0, wickets: 0 },
+          }
+        };
+        return { ...m, innings: newInnings };
+      })
+    }));
+  };
+
+  return (
+    <div className="page">
+      <SubHeader title={isSecondInnings ? "2nd Innings Setup" : "Innings Setup"} subtitle={`${battingTeam.name} batting`} onBack={() => setRoute({ page: "dashboard" })} />
+      <div className="content-scroll">
+        <h3 className="form-section-title">Opening Batsmen</h3>
+        <label className="field-label">Striker</label>
+        <PlayerPicker players={battingTeam.players} selected={striker} exclude={nonStriker} onSelect={setStriker} color={battingTeam.color} />
+        <label className="field-label" style={{ marginTop: 16 }}>Non-striker</label>
+        <PlayerPicker players={battingTeam.players} selected={nonStriker} exclude={striker} onSelect={setNonStriker} color={battingTeam.color} />
+
+        <h3 className="form-section-title" style={{ marginTop: 24 }}>Opening Bowler</h3>
+        <PlayerPicker players={bowlingTeam.players} selected={bowler} exclude={null} onSelect={setBowler} color={bowlingTeam.color} />
+
+        <button className="cta-full" disabled={!striker || !nonStriker || !bowler || striker === nonStriker} onClick={confirm} style={{ marginTop: 24 }}>
+          <Play size={16} fill="currentColor" /> Begin Innings
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PlayerPicker({ players, selected, exclude, onSelect, color }) {
+  return (
+    <div className="player-picker-grid">
+      {players.map((p) => (
+        <button key={p.id} disabled={p.id === exclude} className={`player-pick-opt ${selected === p.id ? "active" : ""}`} style={{ "--team-color": color }} onClick={() => onSelect(p.id)}>
+          <div className="player-avatar" style={{ "--team-color": color }}>{p.name.slice(0, 2).toUpperCase()}</div>
+          {p.name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ============================================================
+// SCORING SCREEN — the core ball-by-ball UI
+// ============================================================
+function ScoringScreen({ data, updateData, match, setRoute, showToast }) {
+  const inn = match.innings[match.currentInnings];
+  const battingTeam = teamById(data, inn.battingTeamId);
+  const bowlingTeam = teamById(data, inn.bowlingTeamId);
+  const [showWicket, setShowWicket] = useState(false);
+  const [showExtras, setShowExtras] = useState(false);
+  const [showBowlerChange, setShowBowlerChange] = useState(false);
+  const [showNewBatsman, setShowNewBatsman] = useState(false);
+  const [pendingWicketRuns, setPendingRuns] = useState(0);
+  const [flash, setFlash] = useState(null);
+  const [showInningsBreak, setShowInningsBreak] = useState(false);
+  const [showMatchEnd, setShowMatchEnd] = useState(false);
+
+  const legalBalls = inn.balls.filter(b => !b.extra || (b.extra !== 'wd' && b.extra !== 'nb')).length;
+  const totalBallsLimit = match.overs * 6;
+  const currentOverBalls = inn.balls.filter((b, idx) => {
+    // balls in the current (incomplete) over
+    return true;
+  });
+
+  const ballsInCurrentOver = (() => {
+    let count = 0;
+    for (let i = inn.balls.length - 1; i >= 0; i--) {
+      const b = inn.balls[i];
+      if (!b.extra || (b.extra !== 'wd' && b.extra !== 'nb')) count++;
+      else count++; // still show in over visualization
+      if (count >= 6 && (!b.extra || (b.extra !== 'wd' && b.extra !== 'nb'))) break;
+    }
+    return count;
+  })();
+
+  const target = match.innings[1] && match.currentInnings === 1 ? match.innings[0].runs + 1 : null;
+  const ballsRemaining = totalBallsLimit - legalBalls;
+  const runsNeeded = target ? target - inn.runs : null;
+
+  const striker = inn.batsmen[inn.strikerId];
+  const nonStriker = inn.batsmen[inn.nonStrikerId];
+  const strikerPlayer = battingTeam.players.find(p => p.id === inn.strikerId);
+  const nonStrikerPlayer = battingTeam.players.find(p => p.id === inn.nonStrikerId);
+  const bowlerPlayer = bowlingTeam.players.find(p => p.id === inn.bowlerId);
+  const bowlerStats = inn.bowlers[inn.bowlerId];
+
+  const availableBatsmen = battingTeam.players.filter(p =>
+    !inn.batsmen[p.id]?.out && p.id !== inn.strikerId && p.id !== inn.nonStrikerId
+  );
+
+  function checkInningsEnd(newInn, newMatchState) {
+    const ballsBowled = newInn.balls.filter(b => !b.extra || (b.extra !== 'wd' && b.extra !== 'nb')).length;
+    const allOut = newInn.wickets >= battingTeam.players.length - 1;
+    const oversComplete = ballsBowled >= totalBallsLimit;
+    const chased = match.currentInnings === 1 && newInn.runs >= (match.innings[0].runs + 1);
+
+    if (allOut || oversComplete || chased) {
+      return true;
+    }
+    return false;
+  }
+
+  function recordBall({ runs = 0, extra = null, wicket = false, wicketType = "bowled" }) {
+    updateData((d) => ({
+      ...d,
+      matches: d.matches.map((m) => {
+        if (m.id !== match.id) return m;
+        const newInnings = [...m.innings];
+        const ci = m.currentInnings;
+        const curInn = { ...newInnings[ci] };
+        const isLegal = !extra || (extra !== 'wd' && extra !== 'nb');
+        const ballRuns = runs + (extra === 'wd' || extra === 'nb' ? 1 : 0);
+
+        const ball = { runs, extra, wicket, wicketType, batsmanId: curInn.strikerId, bowlerId: curInn.bowlerId, timestamp: Date.now() };
+        curInn.balls = [...curInn.balls, ball];
+        curInn.runs = curInn.runs + ballRuns;
+
+        // batsman stats (extras like wd don't count as ball faced; nb runs off bat do count toward batsman runs but not balls)
+        const batsmen = { ...curInn.batsmen };
+        if (extra !== 'wd') {
+          const bs = { ...batsmen[curInn.strikerId] };
+          if (extra !== 'b' && extra !== 'lb') {
+            bs.runs += runs;
+            if (runs === 4) bs.fours += 1;
+            if (runs === 6) bs.sixes += 1;
+          }
+          if (extra !== 'wd') bs.balls += 1;
+          if (wicket) bs.out = true;
+          batsmen[curInn.strikerId] = bs;
+        }
+        curInn.batsmen = batsmen;
+
+        // bowler stats
+        const bowlers = { ...curInn.bowlers };
+        const bw = { ...bowlers[curInn.bowlerId] };
+        bw.runs = (bw.runs || 0) + ballRuns;
+        if (wicket && wicketType !== "runout") bw.wickets = (bw.wickets || 0) + 1;
+        if (isLegal) {
+          bw.ballsInOver = (bw.ballsInOver || 0) + 1;
+          if (bw.ballsInOver === 6) { bw.overs = (bw.overs || 0) + 1; bw.ballsInOver = 0; }
+        }
+        bowlers[curInn.bowlerId] = bw;
+        curInn.bowlers = bowlers;
+
+        if (wicket) {
+          curInn.wickets = curInn.wickets + 1;
+        }
+
+        // rotate strike on odd runs (off the bat, not extras like byes which also rotate on odd)
+        const rotates = (extra === 'b' || extra === 'lb') ? (runs % 2 === 1) : (extra !== 'wd' && extra !== 'nb' ? runs % 2 === 1 : false);
+        if (rotates && !wicket) {
+          const tmp = curInn.strikerId; curInn.strikerId = curInn.nonStrikerId; curInn.nonStrikerId = tmp;
+        }
+
+        // end of over: rotate strike, clear bowler for re-selection
+        const legalCount = curInn.balls.filter(b => !b.extra || (b.extra !== 'wd' && b.extra !== 'nb')).length;
+        if (isLegal && legalCount % 6 === 0 && !wicket) {
+          const tmp = curInn.strikerId; curInn.strikerId = curInn.nonStrikerId; curInn.nonStrikerId = tmp;
+        }
+
+        newInnings[ci] = curInn;
+        return { ...m, innings: newInnings };
+      })
+    }));
+  }
+
+  const handleRun = (n) => {
+    recordBall({ runs: n });
+    setFlash(n);
+    setTimeout(() => setFlash(null), 500);
+  };
+
+  const handleExtra = (type, runs = 0) => {
+    recordBall({ runs, extra: type });
+    setShowExtras(false);
+  };
+
+  const handleWicketConfirm = (type) => {
+    recordBall({ runs: pendingWicketRuns, wicket: true, wicketType: type });
+    setShowWicket(false);
+    setPendingRuns(0);
+    setShowNewBatsman(true);
+  };
+
+  const handleUndo = () => {
+    updateData((d) => ({
+      ...d,
+      matches: d.matches.map((m) => {
+        if (m.id !== match.id) return m;
+        const newInnings = [...m.innings];
+        const ci = m.currentInnings;
+        const curInn = { ...newInnings[ci] };
+        if (curInn.balls.length === 0) return m;
+        const lastBall = curInn.balls[curInn.balls.length - 1];
+        curInn.balls = curInn.balls.slice(0, -1);
+
+        const ballRuns = lastBall.runs + (lastBall.extra === 'wd' || lastBall.extra === 'nb' ? 1 : 0);
+        curInn.runs = curInn.runs - ballRuns;
+        if (lastBall.wicket) curInn.wickets = Math.max(0, curInn.wickets - 1);
+
+        newInnings[ci] = curInn;
+        return { ...m, innings: newInnings };
+      })
+    }));
+    showToast("Last ball undone");
+  };
+
+  const selectNewBatsman = (playerId) => {
+    updateData((d) => ({
+      ...d,
+      matches: d.matches.map((m) => {
+        if (m.id !== match.id) return m;
+        const newInnings = [...m.innings];
+        const ci = m.currentInnings;
+        const curInn = { ...newInnings[ci] };
+        // the striker who got out is replaced
+        const outId = curInn.strikerId;
+        curInn.strikerId = playerId;
+        curInn.batsmen = { ...curInn.batsmen, [playerId]: { runs: 0, balls: 0, fours: 0, sixes: 0, out: false } };
+        curInn.batOrder = [...curInn.batOrder, playerId];
+        newInnings[ci] = curInn;
+        return { ...m, innings: newInnings };
+      })
+    }));
+    setShowNewBatsman(false);
+  };
+
+  const selectNewBowler = (playerId) => {
+    updateData((d) => ({
+      ...d,
+      matches: d.matches.map((m) => {
+        if (m.id !== match.id) return m;
+        const newInnings = [...m.innings];
+        const ci = m.currentInnings;
+        const curInn = { ...newInnings[ci] };
+        curInn.bowlerId = playerId;
+        if (!curInn.bowlers[playerId]) {
+          curInn.bowlers = { ...curInn.bowlers, [playerId]: { overs: 0, ballsInOver: 0, runs: 0, wickets: 0 } };
+        }
+        newInnings[ci] = curInn;
+        return { ...m, innings: newInnings };
+      })
+    }));
+    setShowBowlerChange(false);
+  };
+
+  // Watch for over completion needing new bowler
+  useEffect(() => {
+    const legalCount = inn.balls.filter(b => !b.extra || (b.extra !== 'wd' && b.extra !== 'nb')).length;
+    if (legalCount > 0 && legalCount % 6 === 0 && legalCount < totalBallsLimit) {
+      const lastBall = inn.balls[inn.balls.length - 1];
+      const isLegalLast = !lastBall.extra || (lastBall.extra !== 'wd' && lastBall.extra !== 'nb');
+      if (isLegalLast) setShowBowlerChange(true);
+    }
+  }, [inn.balls.length]);
+
+  // Watch for innings/match end
+  useEffect(() => {
+    if (showNewBatsman || showBowlerChange) return;
+    const ballsBowled = inn.balls.filter(b => !b.extra || (b.extra !== 'wd' && b.extra !== 'nb')).length;
+    const allOut = inn.wickets >= battingTeam.players.length - 1;
+    const oversComplete = ballsBowled >= totalBallsLimit;
+    const chased = match.currentInnings === 1 && inn.runs >= (match.innings[0]?.runs + 1 || Infinity);
+
+    if ((allOut || oversComplete || chased)) {
+      if (match.currentInnings === 0) {
+        setShowInningsBreak(true);
+      } else {
+        setShowMatchEnd(true);
+      }
+    }
+  }, [inn.balls.length, inn.wickets]);
+
+  const startSecondInnings = () => {
+    updateData((d) => ({
+      ...d,
+      matches: d.matches.map((m) => {
+        if (m.id !== match.id) return m;
+        const firstInn = m.innings[0];
+        const newSecondInn = {
+          battingTeamId: firstInn.bowlingTeamId,
+          bowlingTeamId: firstInn.battingTeamId,
+          runs: 0, wickets: 0, balls: [],
+          batsmen: {}, bowlers: {},
+          strikerId: null, nonStrikerId: null, bowlerId: null, batOrder: [],
+        };
+        return { ...m, currentInnings: 1, innings: [...m.innings, newSecondInn] };
+      })
+    }));
+    setShowInningsBreak(false);
+  };
+
+  const finishMatch = () => {
+    updateData((d) => ({
+      ...d,
+      matches: d.matches.map((m) => {
+        if (m.id !== match.id) return m;
+        const inn1 = m.innings[0], inn2 = m.innings[1];
+        const teamAName = teamById(d, m.teamAId).shortName === teamById(d, inn1.battingTeamId).shortName ? teamById(d, inn1.battingTeamId).name : "";
+        const battingFirstTeam = teamById(d, inn1.battingTeamId);
+        const battingSecondTeam = teamById(d, inn2.battingTeamId);
+        let result;
+        if (inn2.runs >= inn1.runs + 1) {
+          const wicketsInHand = battingSecondTeam.players.length - 1 - inn2.wickets;
+          result = `${battingSecondTeam.name} won by ${wicketsInHand} wicket${wicketsInHand !== 1 ? "s" : ""}`;
+        } else if (inn1.runs > inn2.runs) {
+          result = `${battingFirstTeam.name} won by ${inn1.runs - inn2.runs} run${inn1.runs - inn2.runs !== 1 ? "s" : ""}`;
+        } else {
+          result = "Match tied";
+        }
+
+        // find top performer: highest runs or best bowling across both innings
+        let top = null, topScore = -1;
+        [inn1, inn2].forEach((innn) => {
+          Object.entries(innn.batsmen).forEach(([pid, bs]) => {
+            const score = bs.runs * 1.5 + bs.fours + bs.sixes * 2;
+            if (score > topScore) {
+              topScore = score;
+              const team = teamById(d, innn.battingTeamId);
+              const player = team.players.find(p => p.id === pid);
+              top = { playerName: player?.name || "—", teamShort: team.shortName, summary: `${bs.runs} (${bs.balls})` };
+            }
+          });
+        });
+
+        // update player stats
+        const updatedTeams = d.teams.map((t) => {
+          let players = t.players;
+          [inn1, inn2].forEach((innn) => {
+            if (innn.battingTeamId === t.id) {
+              players = players.map((p) => {
+                const bs = innn.batsmen[p.id];
+                if (!bs) return p;
+                return {
+                  ...p,
+                  stats: {
+                    ...p.stats,
+                    matches: p.stats.matches + 1,
+                    runs: p.stats.runs + bs.runs,
+                    balls: p.stats.balls + bs.balls,
+                    fours: p.stats.fours + bs.fours,
+                    sixes: p.stats.sixes + bs.sixes,
+                    highScore: Math.max(p.stats.highScore, bs.runs),
+                  }
+                };
+              });
+            }
+            if (innn.bowlingTeamId === t.id) {
+              players = players.map((p) => {
+                const bw = innn.bowlers[p.id];
+                if (!bw) return p;
+                return { ...p, stats: { ...p.stats, wickets: p.stats.wickets + (bw.wickets || 0) } };
+              });
+            }
+          });
+          return { ...t, players };
+        });
+
+        return {
+          ...m, status: "completed", result, topPerformer: top,
+          __updatedTeams: updatedTeams,
+        };
+      }).map(m => m), // teams handled below
+    }));
+
+    // separately update teams (since matches map above doesn't touch d.teams directly in this structure)
+    updateData((d) => {
+      const m = d.matches.find(x => x.id === match.id);
+      if (!m || !m.__updatedTeams) return d;
+      const { __updatedTeams, ...cleanMatch } = m;
+      return {
+        ...d,
+        teams: __updatedTeams,
+        matches: d.matches.map(x => x.id === match.id ? cleanMatch : x)
+      };
+    });
+
+    setShowMatchEnd(false);
+    setRoute({ page: "scorecard", matchId: match.id });
+    showToast("Match completed!");
+  };
+
+  const currentRR = runRate(inn.runs, legalBalls);
+
+  return (
+    <div className="page scoring-page">
+      <header className="scoring-header">
+        <button className="icon-btn light" onClick={() => setRoute({ page: "dashboard" })}><ChevronLeft size={20} /></button>
+        <div className="scoring-header-mid">
+          <span className="scoring-teams">{teamById(data, match.teamAId).shortName} vs {teamById(data, match.teamBId).shortName}</span>
+          <span className="scoring-overs-label">{match.overs}-over match · Inn {match.currentInnings + 1}</span>
+        </div>
+        <button className="icon-btn light" onClick={handleUndo} disabled={inn.balls.length === 0}><Undo2 size={18} /></button>
+      </header>
+
+      <div className="content-scroll scoring-scroll">
+        {/* Scoreboard */}
+        <div className="scoreboard-card">
+          <div className="scoreboard-team-row">
+            <span className="scoreboard-team-name" style={{ color: battingTeam.color }}>{battingTeam.shortName}</span>
+            {target && <span className="scoreboard-target">Target {target}</span>}
+          </div>
+          <div className="scoreboard-main">
+            <span className="flip-score" key={`${inn.runs}-${inn.wickets}`}>{inn.runs}<span className="flip-wkts">/{inn.wickets}</span></span>
+            <span className="scoreboard-overs">({ballsToOvers(legalBalls)} / {match.overs} ov)</span>
+          </div>
+          <div className="scoreboard-sub-row">
+            <span>CRR {currentRR}</span>
+            {target && <span>Need {Math.max(0, runsNeeded)} from {ballsRemaining} balls</span>}
+            {target && ballsRemaining > 0 && <span>RRR {requiredRunRate(Math.max(0,runsNeeded), ballsRemaining)}</span>}
+          </div>
+
+          {/* Tally-mark over tracker — signature element */}
+          <OverTracker balls={inn.balls} />
+        </div>
+
+        {/* Batsmen / Bowler panel */}
+        <div className="players-panel">
+          <div className="batsman-line active-line">
+            <span className="strike-dot">●</span>
+            <span className="player-name-line">{strikerPlayer?.name}</span>
+            <span className="player-figs">{striker?.runs ?? 0} ({striker?.balls ?? 0})</span>
+          </div>
+          <div className="batsman-line">
+            <span className="strike-dot dim">○</span>
+            <span className="player-name-line">{nonStrikerPlayer?.name}</span>
+            <span className="player-figs">{nonStriker?.runs ?? 0} ({nonStriker?.balls ?? 0})</span>
+          </div>
+          <div className="bowler-line">
+            <span className="player-name-line">{bowlerPlayer?.name}</span>
+            <span className="player-figs">{bowlerStats?.wickets ?? 0}-{bowlerStats?.runs ?? 0} ({ballsToOvers((bowlerStats?.overs||0)*6 + (bowlerStats?.ballsInOver||0))})</span>
+          </div>
+        </div>
+
+        <div style={{ height: 210 }} />
+      </div>
+
+      {/* Scoring controls — bottom anchored for thumb reach */}
+      <div className="scoring-controls">
+        <div className="run-grid">
+          {[0, 1, 2, 3, 4, 6].map((n) => (
+            <button key={n} className={`run-btn run-${n} ${flash === n ? "flash" : ""}`} onClick={() => handleRun(n)}>
+              {n}
+            </button>
+          ))}
+        </div>
+        <div className="action-grid">
+          <button className="action-btn extras-btn" onClick={() => setShowExtras(true)}>Extras</button>
+          <button className="action-btn wicket-btn" onClick={() => setShowWicket(true)}>Wicket</button>
+        </div>
+      </div>
+
+      {/* Extras sheet */}
+      {showExtras && (
+        <Sheet onClose={() => setShowExtras(false)} title="Extras">
+          <div className="extras-grid">
+            <button className="extra-opt" onClick={() => handleExtra("wd")}>Wide<span>+1 run, replay ball</span></button>
+            <button className="extra-opt" onClick={() => handleExtra("nb")}>No Ball<span>+1 run, replay ball</span></button>
+            <button className="extra-opt" onClick={() => handleExtra("b", 1)}>Bye<span>1 run</span></button>
+            <button className="extra-opt" onClick={() => handleExtra("lb", 1)}>Leg Bye<span>1 run</span></button>
+          </div>
+          <p className="form-hint" style={{ marginTop: 10 }}>Need a different bye/leg-bye total?</p>
+          <div className="run-grid-small">
+            {[1, 2, 3, 4].map(n => (
+              <button key={n} className="run-btn-small" onClick={() => handleExtra("b", n)}>{n} bye</button>
+            ))}
+          </div>
+        </Sheet>
+      )}
+
+      {/* Wicket sheet */}
+      {showWicket && (
+        <Sheet onClose={() => setShowWicket(false)} title="Wicket">
+          <p className="form-hint">How was the batsman out?</p>
+          <div className="wicket-types">
+            {["bowled", "caught", "run out", "stumped", "lbw", "hit wicket"].map((wt) => (
+              <button key={wt} className="wicket-type-opt" onClick={() => handleWicketConfirm(wt)}>{wt}</button>
+            ))}
+          </div>
+        </Sheet>
+      )}
+
+      {/* New batsman sheet */}
+      {showNewBatsman && (
+        <Sheet onClose={() => {}} title="Next Batsman">
+          <p className="form-hint">Select the new batsman</p>
+          <div className="player-picker-grid">
+            {availableBatsmen.map((p) => (
+              <button key={p.id} className="player-pick-opt" style={{ "--team-color": battingTeam.color }} onClick={() => selectNewBatsman(p.id)}>
+                <div className="player-avatar" style={{ "--team-color": battingTeam.color }}>{p.name.slice(0,2).toUpperCase()}</div>
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </Sheet>
+      )}
+
+      {/* New bowler sheet */}
+      {showBowlerChange && (
+        <Sheet onClose={() => setShowBowlerChange(false)} title="Over Complete — New Bowler">
+          <p className="form-hint">Select bowler for next over</p>
+          <div className="player-picker-grid">
+            {bowlingTeam.players.filter(p => p.id !== inn.bowlerId).map((p) => (
+              <button key={p.id} className="player-pick-opt" style={{ "--team-color": bowlingTeam.color }} onClick={() => selectNewBowler(p.id)}>
+                <div className="player-avatar" style={{ "--team-color": bowlingTeam.color }}>{p.name.slice(0,2).toUpperCase()}</div>
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </Sheet>
+      )}
+
+      {/* Innings break */}
+      {showInningsBreak && (
+        <Sheet onClose={() => {}} title="Innings Complete">
+          <div className="innings-break-summary">
+            <strong>{battingTeam.name}</strong>
+            <span className="innings-break-score">{inn.runs}/{inn.wickets} <small>({ballsToOvers(legalBalls)} ov)</small></span>
+          </div>
+          <p className="form-hint" style={{ textAlign: "center" }}>{teamById(data, inn.bowlingTeamId).name} need {inn.runs + 1} runs to win</p>
+          <button className="cta-full" onClick={startSecondInnings}><ArrowRight size={16} /> Start 2nd Innings</button>
+        </Sheet>
+      )}
+
+      {/* Match end */}
+      {showMatchEnd && (
+        <Sheet onClose={() => {}} title="Match Complete">
+          <div className="innings-break-summary">
+            <Trophy size={28} color="var(--amber)" />
+            <span style={{ marginTop: 8 }}>{
+              inn.runs >= (match.innings[0]?.runs + 1 || 0)
+                ? `${battingTeam.name} won!`
+                : inn.runs === match.innings[0]?.runs ? "Match Tied!" : `${teamById(data, match.innings[0].battingTeamId).name} won!`
+            }</span>
+          </div>
+          <button className="cta-full" onClick={finishMatch}><Check size={16} /> View Scorecard</button>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+// Tally-mark over tracker — signature visual element
+function OverTracker({ balls }) {
+  // group into overs of 6 legal balls; show last completed + current over
+  const groups = [];
+  let current = [];
+  let legalCountInOver = 0;
+  balls.forEach((b) => {
+    current.push(b);
+    const legal = !b.extra || (b.extra !== 'wd' && b.extra !== 'nb');
+    if (legal) legalCountInOver++;
+    if (legalCountInOver === 6) {
+      groups.push(current);
+      current = [];
+      legalCountInOver = 0;
+    }
+  });
+  if (current.length) groups.push(current);
+  const lastGroup = groups[groups.length - 1] || [];
+
+  const ballLabel = (b) => {
+    if (b.wicket) return "W";
+    if (b.extra === 'wd') return "wd";
+    if (b.extra === 'nb') return "nb";
+    if (b.extra === 'b') return `${b.runs}b`;
+    if (b.extra === 'lb') return `${b.runs}lb`;
+    return String(b.runs);
+  };
+  const ballClass = (b) => {
+    if (b.wicket) return "ball-mark wicket";
+    if (b.extra === 'wd' || b.extra === 'nb') return "ball-mark extra";
+    if (b.runs === 4) return "ball-mark four";
+    if (b.runs === 6) return "ball-mark six";
+    if (b.runs === 0) return "ball-mark dot";
+    return "ball-mark";
+  };
+
+  return (
+    <div className="over-tracker">
+      <span className="over-tracker-label">This over</span>
+      <div className="over-tracker-balls">
+        {lastGroup.length === 0 && <span className="over-tracker-empty">Yet to bowl</span>}
+        {lastGroup.map((b, i) => (
+          <span key={i} className={ballClass(b)}>{ballLabel(b)}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// SCORECARD PAGE (completed or in-progress detail view)
+// ============================================================
+function ScorecardPage({ data, setRoute, matchId, updateData, showToast }) {
+  const match = data.matches.find((m) => m.id === matchId);
+  const cardRef = useRef(null);
+  if (!match) return null;
+  const teamA = teamById(data, match.teamAId);
+  const teamB = teamById(data, match.teamBId);
+
+  const exportSummary = () => {
+    const lines = [];
+    lines.push(`GullyScore — ${teamA.name} vs ${teamB.name}`);
+    lines.push(match.result || "In progress");
+    lines.push("");
+    match.innings.forEach((inn) => {
+      const bt = teamById(data, inn.battingTeamId);
+      lines.push(`${bt.name}: ${inn.runs}/${inn.wickets} (${ballsToOvers(inn.balls.filter(b=>!b.extra||(b.extra!=='wd'&&b.extra!=='nb')).length)} ov)`);
+      Object.entries(inn.batsmen).forEach(([pid, bs]) => {
+        const p = bt.players.find(pp => pp.id === pid);
+        if (p) lines.push(`  ${p.name}: ${bs.runs} (${bs.balls}b, ${bs.fours}x4, ${bs.sixes}x6)${bs.out ? "" : " *"}`);
+      });
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `${teamA.shortName}_vs_${teamB.shortName}_summary.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast("Summary exported");
+  };
+
+  const shareAsImage = () => {
+    showToast("Scorecard ready to share");
+  };
+
+  return (
+    <div className="page">
+      <SubHeader title="Scorecard" onBack={() => setRoute({ page: match.status === "live" ? "live-match" : "history", matchId })} action={
+        <div style={{ display: "flex", gap: 6 }}>
+          <button className="icon-btn" onClick={shareAsImage}><Share2 size={17} /></button>
+          <button className="icon-btn" onClick={exportSummary}><Download size={17} /></button>
+        </div>
+      } />
+      <div className="content-scroll">
+        <div className="scorecard-result-banner" ref={cardRef}>
+          <div className="scorecard-teams-line">{teamA.shortName} vs {teamB.shortName}</div>
+          <div className="scorecard-result-text">{match.result || "Match in progress"}</div>
+          <div className="scorecard-date">{new Date(match.date).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })} · {match.overs} overs</div>
+          {match.topPerformer && (
+            <div className="scorecard-mvp">
+              <Award size={14} /> Top performer: {match.topPerformer.playerName} ({match.topPerformer.teamShort}) — {match.topPerformer.summary}
+            </div>
+          )}
+        </div>
+
+        {match.innings.map((inn, idx) => (
+          <InningsScorecard key={idx} inn={inn} data={data} match={match} />
+        ))}
+
+        <div style={{ height: 30 }} />
+      </div>
+    </div>
+  );
+}
+
+function InningsScorecard({ inn, data, match }) {
+  const battingTeam = teamById(data, inn.battingTeamId);
+  const bowlingTeam = teamById(data, inn.bowlingTeamId);
+  const legalBalls = inn.balls.filter(b => !b.extra || (b.extra !== 'wd' && b.extra !== 'nb')).length;
+
+  return (
+    <div className="innings-card">
+      <div className="innings-card-head">
+        <strong>{battingTeam.name}</strong>
+        <span>{inn.runs}/{inn.wickets} ({ballsToOvers(legalBalls)} ov) · RR {runRate(inn.runs, legalBalls)}</span>
+      </div>
+      <table className="score-table">
+        <thead>
+          <tr><th>Batsman</th><th>R</th><th>B</th><th>4s</th><th>6s</th></tr>
+        </thead>
+        <tbody>
+          {Object.entries(inn.batsmen).map(([pid, bs]) => {
+            const p = battingTeam.players.find(pp => pp.id === pid);
+            return (
+              <tr key={pid}>
+                <td>{p?.name || "—"}{!bs.out && inn.strikerId === pid ? " *" : ""}{!bs.out && inn.nonStrikerId === pid ? " *" : ""}</td>
+                <td>{bs.runs}</td><td>{bs.balls}</td><td>{bs.fours}</td><td>{bs.sixes}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <table className="score-table" style={{ marginTop: 10 }}>
+        <thead>
+          <tr><th>Bowler</th><th>O</th><th>R</th><th>W</th></tr>
+        </thead>
+        <tbody>
+          {Object.entries(inn.bowlers).map(([pid, bw]) => {
+            const p = bowlingTeam.players.find(pp => pp.id === pid);
+            return (
+              <tr key={pid}>
+                <td>{p?.name || "—"}</td>
+                <td>{ballsToOvers((bw.overs||0)*6 + (bw.ballsInOver||0))}</td>
+                <td>{bw.runs || 0}</td><td>{bw.wickets || 0}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ============================================================
+// HISTORY PAGE
+// ============================================================
+function HistoryPage({ data, setRoute }) {
+  const [query, setQuery] = useState("");
+  const completed = data.matches.filter((m) => m.status === "completed");
+  const filtered = completed.filter((m) => {
+    const teamA = teamById(data, m.teamAId), teamB = teamById(data, m.teamBId);
+    const q = query.toLowerCase();
+    return teamA.name.toLowerCase().includes(q) || teamB.name.toLowerCase().includes(q) || (m.result || "").toLowerCase().includes(q);
+  }).reverse();
+
+  return (
+    <div className="page">
+      <SubHeader title="Match History" onBack={() => setRoute({ page: "dashboard" })} />
+      <div className="content-scroll">
+        <div className="search-bar">
+          <Search size={16} />
+          <input placeholder="Search teams or results..." value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        {filtered.length === 0 && <EmptyHint text="No matches found." />}
+        <div className="history-list">
+          {filtered.map((m) => (
+            <RecentMatchCard key={m.id} match={m} data={data} setRoute={setRoute} />
+          ))}
+        </div>
+        <div style={{ height: 90 }} />
+      </div>
+      <BottomNav active="history" setRoute={setRoute} />
+    </div>
+  );
+}
+
+// ============================================================
+// TOURNAMENTS PAGE
+// ============================================================
+function TournamentsPage({ data, updateData, setRoute, showToast }) {
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState("");
+  const [selectedTeams, setSelectedTeams] = useState([]);
+
+  const toggleTeam = (id) => {
+    setSelectedTeams((prev) => prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]);
+  };
+
+  const createTournament = () => {
+    if (!name.trim() || selectedTeams.length < 2) return;
+    // generate round robin schedule
+    const matches = [];
+    for (let i = 0; i < selectedTeams.length; i++) {
+      for (let j = i + 1; j < selectedTeams.length; j++) {
+        matches.push({ id: genId("tmatch"), teamAId: selectedTeams[i], teamBId: selectedTeams[j], status: "scheduled", matchId: null });
+      }
+    }
+    const newT = {
+      id: genId("tourney"), name: name.trim(), teamIds: selectedTeams,
+      matches, status: "active", createdAt: Date.now(),
+    };
+    updateData((d) => ({ ...d, tournaments: [...d.tournaments, newT] }));
+    setName(""); setSelectedTeams([]); setShowCreate(false);
+    showToast("Tournament created");
+  };
+
+  return (
+    <div className="page">
+      <SubHeader title="Tournaments" onBack={() => setRoute({ page: "dashboard" })} action={
+        <button className="icon-btn-fill" onClick={() => setShowCreate(true)}><Plus size={18} /></button>
+      } />
+      <div className="content-scroll">
+        {data.tournaments.length === 0 && <EmptyHint text="No tournaments yet. Create a colony cup!" />}
+        {data.tournaments.map((t) => (
+          <button key={t.id} className="tourney-card-full" onClick={() => setRoute({ page: "tournament-detail", tournamentId: t.id })}>
+            <div className="tourney-card-full-top">
+              <Trophy size={20} color="var(--amber)" />
+              <strong>{t.name}</strong>
+            </div>
+            <span>{t.teamIds.length} teams · {t.matches.filter(m=>m.status==='completed').length}/{t.matches.length} matches played</span>
+          </button>
+        ))}
+        <div style={{ height: 90 }} />
+      </div>
+      <BottomNav active="tournaments" setRoute={setRoute} />
+
+      {showCreate && (
+        <Sheet onClose={() => setShowCreate(false)} title="New Tournament">
+          <label className="field-label">Tournament name</label>
+          <input className="text-input" placeholder="e.g. Colony Premier League" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          <label className="field-label">Select teams (min 2)</label>
+          <div className="team-select-list">
+            {data.teams.map((t) => (
+              <button key={t.id} className={`team-select-row ${selectedTeams.includes(t.id) ? "active" : ""}`} onClick={() => toggleTeam(t.id)}>
+                <div className="team-card-avatar small" style={{ "--team-color": t.color }}>{t.shortName.slice(0,2)}</div>
+                <span>{t.name}</span>
+                {selectedTeams.includes(t.id) && <Check size={16} />}
+              </button>
+            ))}
+          </div>
+          <button className="cta-full" disabled={!name.trim() || selectedTeams.length < 2} onClick={createTournament}><Trophy size={16} /> Create Tournament</button>
+        </Sheet>
+      )}
+    </div>
+  );
+}
+
+function TournamentDetailPage({ data, updateData, setRoute, tournamentId, showToast }) {
+  const t = data.tournaments.find((tt) => tt.id === tournamentId);
+  const [tab, setTab] = useState("points");
+  if (!t) return null;
+
+  const teams = t.teamIds.map(id => teamById(data, id));
+
+  // Compute points table
+  const pointsTable = teams.map((team) => {
+    let played = 0, won = 0, lost = 0, tied = 0, runsFor = 0, ballsFor = 0, runsAgainst = 0, ballsAgainst = 0;
+    t.matches.forEach((tm) => {
+      if (tm.status !== "completed" || !tm.matchId) return;
+      if (tm.teamAId !== team.id && tm.teamBId !== team.id) return;
+      const m = data.matches.find(mm => mm.id === tm.matchId);
+      if (!m) return;
+      played++;
+      const myInn = m.innings.find(i => i.battingTeamId === team.id);
+      const oppInn = m.innings.find(i => i.battingTeamId !== team.id);
+      if (myInn) { runsFor += myInn.runs; ballsFor += myInn.balls.filter(b=>!b.extra||(b.extra!=='wd'&&b.extra!=='nb')).length; }
+      if (oppInn) { runsAgainst += oppInn.runs; ballsAgainst += oppInn.balls.filter(b=>!b.extra||(b.extra!=='wd'&&b.extra!=='nb')).length; }
+      if (m.result?.includes("tied") || m.result?.includes("Tied")) tied++;
+      else if (myInn && oppInn) {
+        if (myInn.runs > oppInn.runs && m.innings.indexOf(myInn) === 0) won++;
+        else if (myInn.runs >= oppInn.runs + 1 && m.innings.indexOf(myInn) === 1) won++;
+        else lost++;
+      }
+    });
+    const nrr = ballsFor > 0 && ballsAgainst > 0
+      ? ((runsFor / (ballsFor/6)) - (runsAgainst / (ballsAgainst/6))).toFixed(2)
+      : "0.00";
+    return { team, played, won, lost, tied, points: won * 2 + tied, nrr };
+  }).sort((a, b) => b.points - a.points || parseFloat(b.nrr) - parseFloat(a.nrr));
+
+  const startTournamentMatch = (tm) => {
+    setRoute({ page: "new-match", prefilledTeams: [tm.teamAId, tm.teamBId], fromTournament: t.id, tournamentMatchId: tm.id });
+  };
+
+  return (
+    <div className="page">
+      <SubHeader title={t.name} subtitle={`${teams.length} teams`} onBack={() => setRoute({ page: "tournaments" })} />
+      <div className="tab-row">
+        <button className={`tab-opt ${tab === "points" ? "active" : ""}`} onClick={() => setTab("points")}>Points Table</button>
+        <button className={`tab-opt ${tab === "schedule" ? "active" : ""}`} onClick={() => setTab("schedule")}>Schedule</button>
+      </div>
+      <div className="content-scroll">
+        {tab === "points" && (
+          <table className="points-table">
+            <thead>
+              <tr><th>Team</th><th>P</th><th>W</th><th>L</th><th>Pts</th><th>NRR</th></tr>
+            </thead>
+            <tbody>
+              {pointsTable.map((row) => (
+                <tr key={row.team.id}>
+                  <td><TeamChip team={row.team} /></td>
+                  <td>{row.played}</td><td>{row.won}</td><td>{row.lost}</td>
+                  <td><strong>{row.points}</strong></td><td>{row.nrr}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {tab === "schedule" && (
+          <div className="schedule-list">
+            {t.matches.map((tm) => {
+              const teamA = teamById(data, tm.teamAId), teamB = teamById(data, tm.teamBId);
+              const m = tm.matchId ? data.matches.find(mm => mm.id === tm.matchId) : null;
+              return (
+                <div key={tm.id} className="schedule-row">
+                  <div className="schedule-teams"><TeamChip team={teamA} /> <span className="vs-text">vs</span> <TeamChip team={teamB} /></div>
+                  {m?.status === "completed" ? (
+                    <button className="schedule-status done" onClick={() => setRoute({ page: "scorecard", matchId: m.id })}>{m.result}</button>
+                  ) : m?.status === "live" ? (
+                    <button className="schedule-status live" onClick={() => setRoute({ page: "live-match", matchId: m.id })}>Live now →</button>
+                  ) : (
+                    <button className="schedule-status" onClick={() => startTournamentMatch(tm)}>Start match</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div style={{ height: 30 }} />
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// GLOBAL CSS — design system
+// ============================================================
+const GLOBAL_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Teko:wght@500;600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
+
+:root {
+  --pitch: #0F1A12;
+  --pitch-2: #16241A;
+  --chalk: #F5F1E6;
+  --chalk-dim: #E8E2D2;
+  --leather: #C1432E;
+  --amber: #D4A24C;
+  --turf: #5B8C3E;
+  --turf-light: #74A856;
+  --slate: #8B9A8C;
+  --surface: #1B2A1F;
+  --surface-2: #223027;
+  --border-soft: rgba(245,241,230,0.09);
+  --shadow-deep: 0 8px 30px rgba(0,0,0,0.35);
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+.dark {
+  --bg: var(--pitch);
+  --bg-2: var(--pitch-2);
+  --surface: #1B2A1F;
+  --surface-2: #223027;
+  --text: var(--chalk);
+  --text-dim: #A9B6A8;
+  --border: var(--border-soft);
+}
+
+:root:not(.dark), html:not(.dark) {
+  --bg: #F5F1E6;
+  --bg-2: #EBE5D4;
+  --surface: #FFFFFF;
+  --surface-2: #F3EFE3;
+  --text: #1B2A1A;
+  --text-dim: #5C6B5A;
+  --border: rgba(27,42,26,0.1);
+}
+
+* { box-sizing: border-box; }
+.app-shell {
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  max-width: 480px;
+  margin: 0 auto;
+  position: relative;
+  overflow-x: hidden;
+}
+
+.page { display: flex; flex-direction: column; height: 100vh; max-height: 100vh; }
+.content-scroll { flex: 1; overflow-y: auto; padding: 0 18px; -webkit-overflow-scrolling: touch; }
+.content-scroll::-webkit-scrollbar { display: none; }
+
+/* ---------- Splash ---------- */
+.splash-mark { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.splash-ball {
+  width: 56px; height: 56px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--leather), #7a2418);
+  position: relative;
+  animation: spin-ball 1.1s linear infinite;
+  box-shadow: 0 8px 24px rgba(193,67,46,0.4);
+}
+.splash-ball::before, .splash-ball::after {
+  content: ''; position: absolute; top: 4px; bottom: 4px; left: 50%;
+  width: 1px; border-left: 1.5px dashed rgba(245,241,230,0.7); transform: translateX(-50%);
+}
+@keyframes spin-ball { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+.splash-text { font-family: 'Teko', sans-serif; font-size: 28px; letter-spacing: 1px; color: var(--chalk); font-weight: 600; }
+
+/* ---------- Topbar / headers ---------- */
+.topbar { display: flex; align-items: center; justify-content: space-between; padding: 22px 18px 14px; }
+.eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--turf-light); font-weight: 700; margin-bottom: 2px; }
+.brand-title { font-family: 'Teko', sans-serif; font-size: 34px; font-weight: 600; letter-spacing: 0.5px; line-height: 1; color: var(--text); }
+
+.subheader { display: flex; align-items: center; gap: 10px; padding: 16px 14px; border-bottom: 1px solid var(--border); }
+.subheader-title { flex: 1; }
+.subheader-title h1 { font-family: 'Teko', sans-serif; font-size: 24px; font-weight: 600; line-height: 1.1; }
+.subheader-title span { font-size: 12px; color: var(--text-dim); }
+
+.icon-btn { background: var(--surface); border: 1px solid var(--border); width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: var(--text); cursor: pointer; transition: transform 0.15s; }
+.icon-btn:active { transform: scale(0.92); }
+.icon-btn.light { background: rgba(245,241,230,0.12); border-color: rgba(245,241,230,0.15); color: var(--chalk); }
+.icon-btn:disabled { opacity: 0.35; }
+.icon-btn-fill { background: var(--turf); border: none; width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; cursor: pointer; }
+.icon-btn-ghost { background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 6px; }
+
+/* ---------- CTA buttons ---------- */
+.cta-primary {
+  width: 100%; display: flex; align-items: center; gap: 14px;
+  background: linear-gradient(135deg, var(--turf), #4a7530);
+  border: none; border-radius: var(--radius-lg); padding: 16px 18px; margin: 16px 0 8px;
+  cursor: pointer; box-shadow: 0 10px 28px rgba(91,140,62,0.35);
+}
+.cta-primary-icon { width: 42px; height: 42px; background: rgba(255,255,255,0.18); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; flex-shrink: 0; }
+.cta-primary-text { flex: 1; text-align: left; display: flex; flex-direction: column; color: white; }
+.cta-primary-text strong { font-size: 15.5px; font-weight: 700; }
+.cta-primary-text span { font-size: 12.5px; opacity: 0.85; margin-top: 1px; }
+.cta-primary svg:last-child { color: white; opacity: 0.85; }
+
+.cta-full {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--turf); color: white; border: none; border-radius: var(--radius-md);
+  padding: 14px; font-size: 15px; font-weight: 700; cursor: pointer; margin-top: 10px;
+}
+.cta-full:disabled { opacity: 0.35; }
+
+/* ---------- Sections ---------- */
+.section { margin-top: 22px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.section-head h2 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.badge-count { background: var(--leather); color: white; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 20px; }
+.link-btn { background: none; border: none; color: var(--turf-light); font-size: 13px; font-weight: 600; cursor: pointer; }
+.section-body { display: flex; flex-direction: column; gap: 10px; }
+.empty-hint { text-align: center; padding: 28px 16px; color: var(--text-dim); font-size: 13.5px; background: var(--surface); border-radius: var(--radius-md); border: 1px dashed var(--border); }
+
+/* ---------- Stat row ---------- */
+.stat-row { display: flex; gap: 10px; margin-top: 18px; }
+.stat-pill { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; align-items: center; gap: 9px; color: var(--turf-light); }
+.stat-pill div { display: flex; flex-direction: column; }
+.stat-pill strong { font-size: 17px; font-family: 'Teko', sans-serif; color: var(--text); line-height: 1; }
+.stat-pill span { font-size: 10.5px; color: var(--text-dim); margin-top: 1px; }
+
+/* ---------- Live / recent cards ---------- */
+.live-card { width: 100%; text-align: left; background: linear-gradient(135deg, var(--surface-2), var(--surface)); border: 1px solid rgba(212,162,76,0.3); border-radius: var(--radius-md); padding: 14px; cursor: pointer; }
+.live-pulse-row { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: var(--leather); text-transform: uppercase; letter-spacing: 0.5px; }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--leather); animation: pulse-dot 1.4s ease-in-out infinite; }
+@keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.live-score-row { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
+.live-score-num { font-family: 'Teko', sans-serif; font-size: 30px; font-weight: 600; }
+.live-score-overs { font-size: 12px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; }
+.live-teams-row { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+
+.recent-card { width: 100%; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 13px 14px; cursor: pointer; }
+.recent-teams { display: flex; align-items: center; gap: 8px; }
+.vs-text { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+.recent-result { font-size: 13px; font-weight: 600; margin-top: 6px; color: var(--text); }
+.recent-meta { display: flex; gap: 12px; margin-top: 6px; font-size: 11px; color: var(--text-dim); flex-wrap: wrap; }
+.recent-meta span { display: flex; align-items: center; gap: 4px; }
+.recent-mvp { color: var(--amber); }
+
+.team-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; padding: 3px 9px 3px 7px; border-radius: 20px; background: color-mix(in srgb, var(--chip-color) 16%, transparent); color: var(--text); }
+.team-chip-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--chip-color); }
+
+.tourney-card { width: 100%; display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 13px; cursor: pointer; text-align: left; }
+.tourney-card-text { flex: 1; display: flex; flex-direction: column; }
+.tourney-card-text strong { font-size: 13.5px; }
+.tourney-card-text span { font-size: 11.5px; color: var(--text-dim); margin-top: 2px; }
+
+/* ---------- Bottom nav ---------- */
+.bottom-nav { position: sticky; bottom: 0; display: flex; background: var(--surface); border-top: 1px solid var(--border); padding: 8px 6px calc(8px + env(safe-area-inset-bottom)); backdrop-filter: blur(10px); }
+.nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; background: none; border: none; color: var(--text-dim); padding: 6px 0; cursor: pointer; font-size: 10.5px; font-weight: 600; }
+.nav-item.active { color: var(--turf-light); }
+
+/* ---------- Teams page ---------- */
+.team-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+.team-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; text-align: left; cursor: pointer; border-top: 3px solid var(--team-color); }
+.team-card-top { display: flex; align-items: center; justify-content: space-between; color: var(--text-dim); }
+.team-card-avatar { width: 36px; height: 36px; border-radius: 10px; background: var(--team-color); color: white; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; }
+.team-card-avatar.small { width: 30px; height: 30px; font-size: 11px; }
+.team-card-name { display: block; margin-top: 10px; font-size: 13.5px; line-height: 1.3; }
+.team-card-meta { font-size: 11px; color: var(--text-dim); }
+
+/* ---------- Forms / inputs ---------- */
+.field-label { display: block; font-size: 12px; font-weight: 700; color: var(--text-dim); margin-bottom: 6px; margin-top: 14px; text-transform: uppercase; letter-spacing: 0.4px; }
+.text-input { width: 100%; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-size: 14.5px; color: var(--text); font-family: inherit; }
+.text-input:focus { outline: 2px solid var(--turf); outline-offset: 1px; }
+.form-section-title { font-family: 'Teko', sans-serif; font-size: 20px; font-weight: 600; margin: 14px 0 4px; }
+.form-hint { font-size: 13px; color: var(--text-dim); margin: 4px 0; }
+.warn-banner { background: rgba(212,162,76,0.12); border: 1px solid rgba(212,162,76,0.3); color: var(--amber); font-size: 12.5px; padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 12px; }
+
+.chip-select { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.chip-opt { background: var(--bg-2); border: 1px solid var(--border); border-radius: 20px; padding: 8px 16px; font-size: 13px; font-weight: 600; color: var(--text-dim); cursor: pointer; }
+.chip-opt.active { background: var(--turf); border-color: var(--turf); color: white; }
+
+/* ---------- Player list ---------- */
+.player-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.player-row { display: flex; align-items: center; gap: 11px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
+.player-avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--team-color, var(--turf)); color: white; display: flex; align-items: center; justify-content: center; font-size: 11.5px; font-weight: 700; flex-shrink: 0; }
+.player-info { flex: 1; display: flex; flex-direction: column; }
+.player-info strong { font-size: 13.5px; }
+.player-info span { font-size: 11px; color: var(--text-dim); }
+
+/* ---------- Sheet (bottom modal) ---------- */
+.sheet-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: flex-end; z-index: 100; max-width: 480px; margin: 0 auto; }
+.sheet { width: 100%; background: var(--bg); border-radius: 22px 22px 0 0; max-height: 85vh; overflow-y: auto; padding-bottom: calc(20px + env(safe-area-inset-bottom)); animation: sheet-up 0.25s ease-out; }
+@keyframes sheet-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.sheet-handle { width: 36px; height: 4px; background: var(--border); border-radius: 4px; margin: 10px auto 4px; }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 18px 6px; }
+.sheet-head h3 { font-family: 'Teko', sans-serif; font-size: 22px; font-weight: 600; }
+.sheet-body { padding: 4px 18px 10px; }
+
+/* ---------- Team / player pickers ---------- */
+.team-picker-grid, .team-select-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.team-pick-opt { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; cursor: pointer; font-size: 13.5px; font-weight: 600; text-align: left; }
+.team-pick-opt.active { border-color: var(--team-color); background: color-mix(in srgb, var(--team-color) 12%, var(--surface)); }
+.team-pick-opt:disabled { opacity: 0.3; }
+.team-select-row { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 9px 12px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.team-select-row.active { border-color: var(--turf); background: rgba(91,140,62,0.12); }
+.team-select-row span { flex: 1; text-align: left; }
+
+.overs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 6px; }
+.overs-opt { display: flex; flex-direction: column; align-items: center; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 14px 0; cursor: pointer; font-family: 'Teko', sans-serif; font-size: 24px; font-weight: 600; }
+.overs-opt span { font-family: 'Inter', sans-serif; font-size: 10px; color: var(--text-dim); font-weight: 600; }
+.overs-opt.active { border-color: var(--turf); background: rgba(91,140,62,0.12); color: var(--turf-light); }
+
+.toss-grid { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.toss-opt { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 11px 12px; cursor: pointer; font-size: 13.5px; font-weight: 600; text-align: left; }
+.toss-opt.active { border-color: var(--team-color); background: color-mix(in srgb, var(--team-color) 12%, var(--surface)); }
+
+.player-picker-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+.player-pick-opt { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-sm); padding: 9px 10px; cursor: pointer; font-size: 12.5px; font-weight: 600; text-align: left; }
+.player-pick-opt.active { border-color: var(--team-color); background: color-mix(in srgb, var(--team-color) 15%, var(--surface)); }
+.player-pick-opt:disabled { opacity: 0.3; }
+
+/* ---------- Scoring screen ---------- */
+.scoring-page { background: var(--pitch); color: var(--chalk); }
+.scoring-header { display: flex; align-items: center; gap: 10px; padding: 16px 14px; }
+.scoring-header-mid { flex: 1; text-align: center; display: flex; flex-direction: column; }
+.scoring-teams { font-size: 13px; font-weight: 700; }
+.scoring-overs-label { font-size: 10.5px; color: var(--slate); margin-top: 1px; }
+.scoring-scroll { padding-top: 4px; }
+
+.scoreboard-card { background: linear-gradient(160deg, var(--surface-2), var(--surface)); border: 1px solid rgba(245,241,230,0.08); border-radius: var(--radius-lg); padding: 18px; }
+.scoreboard-team-row { display: flex; align-items: center; justify-content: space-between; }
+.scoreboard-team-name { font-size: 13px; font-weight: 800; letter-spacing: 0.5px; }
+.scoreboard-target { font-size: 11px; color: var(--amber); font-weight: 700; background: rgba(212,162,76,0.14); padding: 3px 9px; border-radius: 20px; }
+.scoreboard-main { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; }
+.flip-score { font-family: 'Teko', sans-serif; font-size: 56px; font-weight: 600; line-height: 1; color: var(--chalk); animation: score-pop 0.35s ease-out; }
+.flip-wkts { color: var(--leather); }
+@keyframes score-pop { 0% { transform: scale(0.85); opacity: 0.5; } 100% { transform: scale(1); opacity: 1; } }
+.scoreboard-overs { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--slate); }
+.scoreboard-sub-row { display: flex; gap: 14px; margin-top: 6px; font-size: 11.5px; color: var(--slate); font-family: 'JetBrains Mono', monospace; flex-wrap: wrap; }
+
+/* Signature: tally-mark over tracker */
+.over-tracker { margin-top: 16px; padding-top: 14px; border-top: 1px dashed rgba(245,241,230,0.12); }
+.over-tracker-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--slate); font-weight: 700; }
+.over-tracker-balls { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.over-tracker-empty { font-size: 12px; color: var(--slate); font-style: italic; }
+.ball-mark { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; background: rgba(245,241,230,0.07); color: var(--chalk-dim); border: 1px solid rgba(245,241,230,0.1); }
+.ball-mark.dot { color: var(--slate); }
+.ball-mark.four { background: rgba(212,162,76,0.18); border-color: var(--amber); color: var(--amber); }
+.ball-mark.six { background: rgba(91,140,62,0.25); border-color: var(--turf-light); color: var(--turf-light); }
+.ball-mark.wicket { background: rgba(193,67,46,0.22); border-color: var(--leather); color: #ff8a73; }
+.ball-mark.extra { background: rgba(245,241,230,0.1); font-size: 9px; }
+
+.players-panel { background: var(--surface); border: 1px solid rgba(245,241,230,0.07); border-radius: var(--radius-md); padding: 14px; margin-top: 12px; }
+.batsman-line, .bowler-line { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13px; }
+.bowler-line { margin-top: 6px; padding-top: 10px; border-top: 1px solid rgba(245,241,230,0.08); color: var(--slate); }
+.strike-dot { color: var(--turf-light); font-size: 9px; }
+.strike-dot.dim { color: var(--slate); }
+.player-name-line { flex: 1; font-weight: 600; }
+.active-line .player-name-line { color: var(--chalk); font-weight: 700; }
+.player-figs { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--slate); }
+
+/* Scoring controls — thumb zone */
+.scoring-controls { position: fixed; bottom: 0; left: 0; right: 0; max-width: 480px; margin: 0 auto; background: linear-gradient(180deg, transparent, var(--pitch) 18%); padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); }
+.run-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 7px; margin-bottom: 9px; }
+.run-btn { aspect-ratio: 1; border-radius: 14px; border: none; font-family: 'Teko', sans-serif; font-size: 24px; font-weight: 600; cursor: pointer; background: var(--surface-2); color: var(--chalk); border: 1px solid rgba(245,241,230,0.1); transition: transform 0.1s; }
+.run-btn:active, .run-btn.flash { transform: scale(0.9); }
+.run-4 { background: rgba(212,162,76,0.2); color: var(--amber); border-color: rgba(212,162,76,0.4); }
+.run-6 { background: rgba(91,140,62,0.3); color: var(--turf-light); border-color: rgba(91,140,62,0.5); }
+.action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.action-btn { padding: 14px; border-radius: 14px; border: none; font-size: 14px; font-weight: 700; cursor: pointer; }
+.extras-btn { background: var(--surface-2); color: var(--chalk); border: 1px solid rgba(245,241,230,0.12); }
+.wicket-btn { background: var(--leather); color: white; }
+
+.run-grid-small { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.run-btn-small { padding: 10px 0; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-2); color: var(--text); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+
+.extras-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 6px; }
+.extra-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; cursor: pointer; font-size: 14px; font-weight: 700; color: var(--text); }
+.extra-opt span { font-size: 10.5px; color: var(--text-dim); font-weight: 500; }
+
+.wicket-types { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.wicket-type-opt { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; cursor: pointer; font-size: 13px; font-weight: 600; text-transform: capitalize; color: var(--text); }
+.wicket-type-opt:active { background: rgba(193,67,46,0.15); border-color: var(--leather); }
+
+.innings-break-summary { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; text-align: center; }
+.innings-break-summary strong { font-size: 16px; }
+.innings-break-score { font-family: 'Teko', sans-serif; font-size: 36px; font-weight: 600; color: var(--turf-light); }
+.innings-break-score small { font-family: 'Inter', sans-serif; font-size: 13px; color: var(--text-dim); }
+
+/* ---------- Scorecard page ---------- */
+.scorecard-result-banner { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 18px; text-align: center; margin-top: 10px; }
+.scorecard-teams-line { font-size: 11px; color: var(--text-dim); font-weight: 700; letter-spacing: 0.5px; }
+.scorecard-result-text { font-family: 'Teko', sans-serif; font-size: 24px; font-weight: 600; margin-top: 4px; color: var(--turf-light); }
+.scorecard-date { font-size: 11.5px; color: var(--text-dim); margin-top: 4px; }
+.scorecard-mvp { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 10px; font-size: 12px; color: var(--amber); background: rgba(212,162,76,0.1); padding: 7px 10px; border-radius: 20px; }
+
+.innings-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; margin-top: 12px; }
+.innings-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.innings-card-head strong { font-size: 14px; }
+.innings-card-head span { font-size: 11.5px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; }
+.score-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.score-table th { text-align: left; color: var(--text-dim); font-weight: 600; padding: 4px 4px; border-bottom: 1px solid var(--border); font-size: 10.5px; text-transform: uppercase; }
+.score-table td { padding: 6px 4px; border-bottom: 1px solid var(--border); }
+.score-table td:not(:first-child), .score-table th:not(:first-child) { text-align: center; font-family: 'JetBrains Mono', monospace; }
+
+/* ---------- History ---------- */
+.search-bar { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 11px 14px; margin: 8px 0 14px; color: var(--text-dim); }
+.search-bar input { flex: 1; background: none; border: none; outline: none; color: var(--text); font-size: 13.5px; font-family: inherit; }
+.history-list { display: flex; flex-direction: column; gap: 10px; }
+
+/* ---------- Tournaments ---------- */
+.tourney-card-full { width: 100%; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; margin-bottom: 10px; cursor: pointer; }
+.tourney-card-full-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.tourney-card-full-top strong { font-size: 14.5px; }
+.tourney-card-full span { font-size: 11.5px; color: var(--text-dim); }
+
+.tab-row { display: flex; gap: 6px; padding: 12px 18px 0; }
+.tab-opt { flex: 1; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 700; color: var(--text-dim); cursor: pointer; }
+.tab-opt.active { background: var(--turf); border-color: var(--turf); color: white; }
+
+.points-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 12.5px; }
+.points-table th { text-align: left; color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+.points-table td { padding: 9px 4px; border-bottom: 1px solid var(--border); }
+.points-table td:not(:first-child), .points-table th:not(:first-child) { text-align: center; font-family: 'JetBrains Mono', monospace; }
+
+.schedule-list { display: flex; flex-direction: column; gap: 9px; margin-top: 12px; }
+.schedule-row { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.schedule-teams { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.schedule-status { background: var(--turf); color: white; border: none; padding: 7px 12px; border-radius: 20px; font-size: 11.5px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.schedule-status.done { background: var(--bg-2); color: var(--text-dim); }
+.schedule-status.live { background: var(--leather); }
+
+/* ---------- Toast ---------- */
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--turf); color: white; padding: 11px 18px; border-radius: 30px; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow-deep); z-index: 200; animation: toast-up 0.25s ease-out; }
+@keyframes toast-up { from { transform: translate(-50%, 20px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+`;
